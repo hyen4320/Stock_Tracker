@@ -16,9 +16,10 @@
   일요일 18:00 ET(=08:00 KST)에야 재개장하므로 자동으로 NaN — 주말 동안 새 정보가
   실제로 없으니 정직한 처리다(금요일 마감까지는 일봉 피처가 이미 안다).
 
-캐시: data/intraday_{slug}.parquet 누적(UTC). yfinance는 시간봉을 730일까지만
-보관하므로 **주기적으로 실행해 캐시를 늘려야 과거가 보존된다** (현재 시작점:
-NQ/ES 2024-01-19, KRW 2023-08-25).
+캐시: DB 테이블 intraday_bars 가 정본(개선점 #6 — durability). yfinance는 시간봉을
+730일까지만 보관하므로 **주기적으로 실행해 캐시를 늘려야 과거가 보존된다**
+(현재 시작점: NQ/ES 2024-01-19, KRW 2023-08-25). 과거 parquet 캐시는
+scripts/migrate_cache_to_db.py 로 1회 이관한다.
 
 단독 점검:  python -m experiments.intraday_snapshot
 """
@@ -26,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -37,10 +37,10 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-log = logging.getLogger("intraday")
+from backend.db import init_db
+from backend.intraday_store import load_bars, upsert_bars
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-DATA_DIR.mkdir(exist_ok=True)
+log = logging.getLogger("intraday")
 
 TICKERS = {"NQ=F": "nq", "ES=F": "es", "KRW=X": "krw"}
 INTRA_COLS = [f"{slug}_drift_0800" for slug in TICKERS.values()]
@@ -50,24 +50,25 @@ STALE_LIMIT = pd.Timedelta(hours=3)
 
 
 def load_hourly(tk: str) -> pd.Series:
-    """시간봉 종가(UTC, 봉 *종료* 시각 인덱스). 캐시 + 신규분 병합."""
-    path = DATA_DIR / f"intraday_{TICKERS[tk]}.parquet"
-    cached = (pd.read_parquet(path).iloc[:, 0] if path.exists()
-              else pd.Series(dtype=float))
+    """시간봉 종가(UTC, 봉 *종료* 시각 인덱스). DB 캐시 + yfinance 신규분 병합.
+
+    신규분을 DB에 upsert(멱등)하고, DB 전체 이력을 병합한 Series를 반환한다.
+    """
+    cached = load_bars(tk)
     fresh = yf.download(tk, interval="1h", period="730d",
                         progress=False, auto_adjust=False)
-    if not fresh.empty:
-        close = fresh["Close"]
-        if isinstance(close, pd.DataFrame):  # MultiIndex 컬럼
-            close = close.iloc[:, 0]
-        # 봉 시작 → 종료 시각으로 변환해 "완결 시점" 인덱스로 저장
-        s = close.copy()
-        s.index = s.index.tz_convert("UTC") + pd.Timedelta(hours=1)
-        s = s.rename("close").dropna()
-        cached = pd.concat([cached, s]) if not cached.empty else s
-        cached = cached[~cached.index.duplicated(keep="last")].sort_index().rename("close")
-        cached.to_frame().to_parquet(path)
-    return cached
+    if fresh.empty:
+        return cached
+    close = fresh["Close"]
+    if isinstance(close, pd.DataFrame):  # MultiIndex 컬럼
+        close = close.iloc[:, 0]
+    # 봉 시작 → 종료 시각으로 변환해 "완결 시점" 인덱스로 저장
+    s = close.copy()
+    s.index = s.index.tz_convert("UTC") + pd.Timedelta(hours=1)
+    s = s.rename("close").dropna()
+    upsert_bars(tk, s)  # 신규/수정 봉만 DB에 반영(충돌 시 keep-last)
+    merged = pd.concat([cached, s]) if not cached.empty else s
+    return merged[~merged.index.duplicated(keep="last")].sort_index().rename("close")
 
 
 def _price_asof(close: pd.Series, ts: pd.Timestamp) -> float:
@@ -111,8 +112,8 @@ def intraday_features(kr_days: pd.DatetimeIndex) -> pd.DataFrame:
 def accrue() -> dict[str, int]:
     """모든 티커의 시간봉 캐시를 1회 적립한다. 종목별 누적 봉 수를 반환(로깅용).
 
-    yfinance 시간봉은 730일만 보관되므로 주기 호출로 과거를 parquet에 박제한다.
-    적립은 멱등(dedup keep-last)이라 중복 실행은 무해하다. 한 티커가 실패해도
+    yfinance 시간봉은 730일만 보관되므로 주기 호출로 과거를 DB에 박제한다.
+    적립은 멱등(upsert keep-last)이라 중복 실행은 무해하다. 한 티커가 실패해도
     나머지는 계속 진행한다(네트워크 일시 장애가 전체를 막지 않도록).
     """
     counts: dict[str, int] = {}
@@ -127,6 +128,7 @@ def accrue() -> dict[str, int]:
 
 
 def main():
+    init_db()
     days = pd.bdate_range("2023-09-01", pd.Timestamp.today()).normalize()
     f = intraday_features(days)
     print(f"영업일 {len(f)}일 기준 커버리지:")

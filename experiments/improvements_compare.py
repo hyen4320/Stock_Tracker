@@ -36,7 +36,6 @@ v2 프로토콜(strict-backward 정렬, 학습 fold 내 winsorize, ES 셋 분리
 from __future__ import annotations
 
 import io
-import os
 import sys
 import time
 import warnings
@@ -53,6 +52,7 @@ import requests
 import yfinance as yf
 from scipy.stats import norm
 
+from backend.series_store import load_frame, upsert_frame
 from experiments.model_compare import ES_FRAC, ES_ROUNDS, mono_vector
 from experiments.spec_compare import (
     EMBARGO, KR, RANDOM_STATE, START, US_COMMON, US_SPECIFIC, WINSOR, COND_THR,
@@ -69,7 +69,6 @@ BOOT_B = 2000           # block bootstrap 반복 (#1)
 BOOT_BLOCK = 20
 DM_LAG = 10             # DM 검정 Newey-West 랙
 COSTS_BP = [0, 10, 30]  # 왕복 거래비용 시나리오 (#7)
-CACHE_DIR = "data"
 
 FLOW_COLS = ["frgn_ratio_prev", "frgn_5d_prev", "frgn_z20_prev", "inst_ratio_prev"]
 
@@ -89,12 +88,11 @@ def fetch_raw():
 
 
 def fetch_naver_flows(code: str) -> pd.DataFrame:
-    """네이버 금융 일별 외국인/기관 순매매량 (#9). data/ 에 캐시."""
-    path = os.path.join(CACHE_DIR, f"naver_frgn_{code}.csv")
-    if os.path.exists(path):
-        df = pd.read_csv(path, parse_dates=["date"], index_col="date")
-        print(f"  [{code}] 수급 캐시 사용: {path} ({len(df)}일)")
-        return df
+    """네이버 금융 일별 외국인/기관 순매매량 (#9). DB(daily_series)에 캐시."""
+    cached = load_frame("naver_frgn", entity=code)
+    if not cached.empty:
+        print(f"  [{code}] 수급 캐시 사용(DB): {len(cached)}일")
+        return cached
 
     sess = requests.Session()
     sess.headers["User-Agent"] = "Mozilla/5.0"
@@ -118,9 +116,8 @@ def fetch_naver_flows(code: str) -> pd.DataFrame:
     df = (pd.concat(frames).drop_duplicates("date").set_index("date")
           .sort_index().loc[start_ts:])
     df = df.apply(pd.to_numeric, errors="coerce")
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    df.to_csv(path)
-    print(f"  [{code}] 네이버 수급 {len(df)}일 수집 ({page}페이지) → {path}")
+    upsert_frame("naver_frgn", df, entity=code)
+    print(f"  [{code}] 네이버 수급 {len(df)}일 수집 ({page}페이지) → DB")
     return df
 
 

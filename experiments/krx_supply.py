@@ -28,6 +28,8 @@ except Exception:
 
 import pandas as pd
 
+from backend.series_store import load_frame, upsert_frame
+
 # .env 로드 (config.py와 동일 동작 — 추가 의존 없이 best-effort)
 try:
     from dotenv import load_dotenv
@@ -35,8 +37,7 @@ try:
 except Exception:
     pass
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-DATA_DIR.mkdir(exist_ok=True)
+SOURCE = "krx_supply"
 
 # 종목코드(숫자) — yfinance 티커가 아니라 KRX 6자리
 KR_CODES = {"삼성전자": "005930", "SK하이닉스": "000660"}
@@ -135,23 +136,20 @@ def fetch_supply(code: str, start: str, end: str) -> pd.DataFrame:
 
 
 def load_supply(name: str, start: str, end: str, refresh: bool = False) -> pd.DataFrame:
-    """캐시 우선 로드. 없거나 refresh면 KRX에서 받아 csv에 저장."""
+    """캐시 우선 로드. 없거나 refresh면 KRX에서 받아 DB에 저장."""
     code = KR_CODES[name]
-    path = DATA_DIR / f"krx_supply_{code}.csv"
-    cached = pd.DataFrame()
-    if path.exists() and not refresh:
-        cached = pd.read_csv(path, index_col=0, parse_dates=True)
+    cached = load_frame(SOURCE, entity=code)
+    if not refresh and not cached.empty:
         # 캐시가 요청 범위를 덮으면 그대로 사용
         s, e = pd.Timestamp(start), pd.Timestamp(end)
-        if not cached.empty and cached.index.min() <= s and cached.index.max() >= e:
+        if cached.index.min() <= s and cached.index.max() >= e:
             return cached.loc[s:e]
     fresh = fetch_supply(code, start.replace("-", ""), end.replace("-", ""))
     if fresh.empty:
         return cached  # 수집 실패 시 가진 캐시라도 반환
+    upsert_frame(SOURCE, fresh, entity=code)
     merged = (pd.concat([cached, fresh]) if not cached.empty else fresh)
-    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-    merged.to_csv(path)
-    return merged
+    return merged[~merged.index.duplicated(keep="last")].sort_index()
 
 
 def main():

@@ -62,3 +62,38 @@ class Prediction(Base):
             "actual_open": self.actual_open,
             "error_pct": self.error_pct,
         }
+
+
+class IntradayBar(Base):
+    """인트라데이 시간봉 종가 캐시(개선점 #6). yfinance 730일 한계로 사라지는
+    과거를 박제하는 durable 정본 — (ticker, ts) 복합 PK로 멱등 upsert.
+
+    ts 는 봉 *종료* 시각(UTC). close 는 종가. 종목별 ~1.5만행 규모로 가볍다.
+    """
+
+    __tablename__ = "intraday_bars"
+
+    ticker: Mapped[str] = mapped_column(String(16), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    close: Mapped[float] = mapped_column(Float)
+
+
+class DailySeries(Base):
+    """일별 다(多)지표 시계열의 범용 long-format 캐시.
+
+    KRX 수급/프로그램매매, 금투협 신용/증시자금, 네이버 외국인 수급 등 소스마다
+    컬럼이 다른 캐시를 테이블 하나로 담는다(컬럼 가변 → 테이블 4개·ALTER 회피).
+    한 셀 = (source, entity, date, metric) → value. wide DataFrame은 읽을 때 pivot.
+
+      source : 'krx_supply' | 'krx_program' | 'kofia' | 'naver_frgn' ...
+      entity : 종목코드('005930')·시장('STK')·종류('credit') 등 (없으면 '')
+      metric : 컬럼명('frgn_net' 등)
+    """
+
+    __tablename__ = "daily_series"
+
+    source: Mapped[str] = mapped_column(String(32), primary_key=True)
+    entity: Mapped[str] = mapped_column(String(32), primary_key=True, default="")
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    metric: Mapped[str] = mapped_column(String(32), primary_key=True)
+    value: Mapped[float] = mapped_column(Float)

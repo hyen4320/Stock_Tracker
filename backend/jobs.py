@@ -108,8 +108,8 @@ def record_actuals() -> int:
 def accrue_intraday_cache() -> dict[str, int]:
     """인트라데이 시간봉 캐시를 1회 적립한다(개선점 #6 — 커버리지 누적).
 
-    yfinance 시간봉 730일 한계로 과거가 지워지므로 매일 parquet에 박제해야
-    학습 커버리지가 오른다. 멱등이라 중복 실행은 무해하다.
+    yfinance 시간봉 730일 한계로 과거가 지워지므로 매일 DB(intraday_bars)에
+    박제해야 학습 커버리지가 오른다. 멱등이라 중복 실행은 무해하다.
     """
     from experiments.intraday_snapshot import accrue
 

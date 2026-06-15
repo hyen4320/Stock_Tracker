@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import sys
 import time
-from pathlib import Path
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -27,10 +26,10 @@ except Exception:
 
 import pandas as pd
 
+from backend.series_store import load_frame, upsert_frame
 from experiments.krx_supply import _UA, KR_CODES, login_session
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-DATA_DIR.mkdir(exist_ok=True)
+SOURCE = "krx_program"
 
 GETJSON = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
 HDR = {"User-Agent": _UA, "X-Requested-With": "XMLHttpRequest",
@@ -40,11 +39,11 @@ ROW_KEY = {"차익": "prog_arb_net", "비차익": "prog_nonarb_net", "전체": "
 
 def _trading_days(start: str, end: str) -> pd.DatetimeIndex:
     """krx_supply 캐시의 날짜 인덱스 = KRX 거래일 캘린더."""
-    path = DATA_DIR / f"krx_supply_{KR_CODES['삼성전자']}.csv"
-    if not path.exists():
+    sup = load_frame("krx_supply", entity=KR_CODES["삼성전자"])
+    if sup.empty:
         raise FileNotFoundError(
-            f"{path} 없음 — 먼저 `python -m experiments.krx_supply` 로 수급을 수집하세요.")
-    idx = pd.read_csv(path, index_col=0, parse_dates=True).index
+            "krx_supply 캐시 없음 — 먼저 `python -m experiments.krx_supply` 로 수급을 수집하세요.")
+    idx = sup.index
     return idx[(idx >= start) & (idx <= end)]
 
 
@@ -75,10 +74,7 @@ def fetch_day(session, day: pd.Timestamp, mkt: str = "STK") -> dict | None:
 
 def load_program(start: str, end: str, mkt: str = "STK") -> pd.DataFrame:
     """캐시 우선 로드. 빠진 거래일만 KRX에서 받아 누적 저장."""
-    path = DATA_DIR / f"krx_program_{mkt}.csv"
-    cached = pd.DataFrame()
-    if path.exists():
-        cached = pd.read_csv(path, index_col=0, parse_dates=True)
+    cached = load_frame(SOURCE, entity=mkt)
     days = _trading_days(start, end)
     missing = days.difference(cached.index)
     if len(missing) == 0:
@@ -96,9 +92,11 @@ def load_program(start: str, end: str, mkt: str = "STK") -> pd.DataFrame:
             got[day] = row
         time.sleep(0.05)
         if i % 250 == 0 or i == len(missing):
-            cached = pd.concat([cached, pd.DataFrame.from_dict(got, orient="index")])
-            cached = cached[~cached.index.duplicated(keep="last")].sort_index()
-            cached.to_csv(path)
+            new = pd.DataFrame.from_dict(got, orient="index")
+            if not new.empty:
+                upsert_frame(SOURCE, new, entity=mkt)  # 중간 저장(중단 안전)
+                cached = pd.concat([cached, new])
+                cached = cached[~cached.index.duplicated(keep="last")].sort_index()
             got = {}
             rate = i / (time.time() - t0)
             print(f"  {i}/{len(missing)} ({rate:.1f}일/초, 누적 {len(cached)}일 저장)")
