@@ -1,0 +1,16 @@
+# --- 백엔드 (FastAPI) ---
+fastapi>=0.115
+uvicorn[standard]>=0.32
+
+# --- DB / 스케줄러 ---
+sqlalchemy>=2.0
+psycopg[binary]>=3.2   # PostgreSQL 드라이버 (prod). 로컬은 SQLite 폴백
+apscheduler>=3.10
+python-dotenv>=1.0     # .env 에서 DATABASE_URL 등 로드
+
+# --- 데이터 / 모델 ---
+yfinance>=0.2.50
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.5
+joblib>=1.4
